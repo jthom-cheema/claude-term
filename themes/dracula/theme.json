@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "name": "dracula",
+  "display_name": "Dracula",
+  "description": "Dracula editor colors",
+  "states": {
+    "session.start": { "action": "reset",  "label": "Session started" },
+    "working":       { "r": 98,  "g": 114, "b": 164, "label": "Working"    },
+    "done":          { "r": 80,  "g": 250, "b": 123, "label": "Done"       },
+    "attention":     { "r": 255, "g": 184, "b": 108, "label": "Attention"  },
+    "permission":    { "r": 255, "g": 85,  "b": 85,  "label": "Permission" }
+  }
+}

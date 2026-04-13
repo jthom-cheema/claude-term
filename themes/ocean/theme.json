@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "name": "ocean",
+  "display_name": "Ocean",
+  "description": "Calm oceanic palette",
+  "states": {
+    "session.start": { "action": "reset",  "label": "Session started" },
+    "working":       { "r": 15,  "g": 98,  "b": 154, "label": "Working"    },
+    "done":          { "r": 32,  "g": 178, "b": 170, "label": "Done"       },
+    "attention":     { "r": 255, "g": 165, "b": 80,  "label": "Attention"  },
+    "permission":    { "r": 180, "g": 30,  "b": 45,  "label": "Permission" }
+  }
+}

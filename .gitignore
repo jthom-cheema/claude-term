@@ -1,0 +1,10 @@
+# ClaudeTerm runtime state files (written at hook time, not tracked)
+.state.json
+.state.json.tmp
+.paused
+
+# User config (generated on first run)
+config.json
+
+# User-created custom themes (not part of the repo)
+themes/custom/

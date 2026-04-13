@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "name": "solarized",
+  "display_name": "Solarized",
+  "description": "Classic Solarized",
+  "states": {
+    "session.start": { "action": "reset",  "label": "Session started" },
+    "working":       { "r": 38,  "g": 139, "b": 210, "label": "Working"    },
+    "done":          { "r": 133, "g": 153, "b": 0,   "label": "Done"       },
+    "attention":     { "r": 203, "g": 75,  "b": 22,  "label": "Attention"  },
+    "permission":    { "r": 220, "g": 50,  "b": 47,  "label": "Permission" }
+  }
+}

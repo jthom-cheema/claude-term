@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "name": "default",
+  "display_name": "Default",
+  "description": "Clean blue/green/orange",
+  "states": {
+    "session.start": { "action": "reset",  "label": "Session started" },
+    "working":       { "r": 0,   "g": 120, "b": 212, "label": "Working"    },
+    "done":          { "r": 16,  "g": 160, "b": 80,  "label": "Done"       },
+    "attention":     { "r": 255, "g": 140, "b": 0,   "label": "Attention"  },
+    "permission":    { "r": 196, "g": 43,  "b": 28,  "label": "Permission" }
+  }
+}

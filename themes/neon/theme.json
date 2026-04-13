@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "name": "neon",
+  "display_name": "Neon",
+  "description": "Vibrant cyberpunk",
+  "states": {
+    "session.start": { "action": "reset",  "label": "Session started" },
+    "working":       { "r": 0,   "g": 255, "b": 255, "label": "Working"    },
+    "done":          { "r": 57,  "g": 255, "b": 20,  "label": "Done"       },
+    "attention":     { "r": 255, "g": 215, "b": 0,   "label": "Attention"  },
+    "permission":    { "r": 255, "g": 20,  "b": 147, "label": "Permission" }
+  }
+}
