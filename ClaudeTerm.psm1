@@ -762,9 +762,39 @@ function Invoke-ClaudeTerm {
 }
 
 Export-ModuleMember -Function @(
+    # ── Main entry points (called by claude-term.ps1, hook.ps1, install.ps1) ──
     'Invoke-ClaudeTerm',
     'Invoke-HookEvent',
+    'Install-ClaudeTerm',
+    'Uninstall-ClaudeTerm',
+
+    # ── Terminal primitives (useful for scripting / custom hooks) ──
+    'Get-TerminalType',
     'Set-WTTabColor',
     'Reset-WTTabColor',
-    'Set-WTTabTitle'
+    'Set-WTTabTitle',
+
+    # ── CLI commands (each reachable via Invoke-ClaudeTerm, but also
+    #    directly importable for scripting or testing) ──
+    'Show-Help',
+    'Show-Status',
+    'Set-Paused',
+    'Set-Resumed',
+    'Invoke-Toggle',
+    'Invoke-Reset',
+    'Invoke-Test',
+    'Invoke-ThemeState',
+    'Invoke-ThemePreview',
+    'Invoke-NextTheme',
+    'Get-ThemeList',
+    'Set-ActiveTheme',
+    'Set-Feature',
+
+    # ── Config / state accessors (useful for scripting) ──
+    'Read-Config',
+    'Write-Config',
+    'Read-State',
+    'Read-Theme',
+    'Get-ActiveTheme',
+    'Ensure-Config'
 )
