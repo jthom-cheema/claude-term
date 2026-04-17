@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     ClaudeTerm - Windows Terminal visual feedback plugin for Claude Code.
@@ -9,17 +9,18 @@
     Claude Code hook events, so you can glance at any tab and know its
     state at a moment's notice.
 
-    Tab color is set via the Windows Terminal escape sequence:
-        ESC ] 9 ; 16 ; <r> ; <g> ; <b> ST
+    Tab color is set via the xterm OSC 4 sequence writing Windows Terminal's
+    reserved frame-background color-table index 264:
+        ESC ] 4 ; 264 ; rgb:RR/GG/BB BEL
 
-    This requires Windows Terminal 1.18+ and is the only programmatic way
-    to change a tab color from inside a running session (the --tabColor
-    command-line flag only works at launch time).
+    Requires Windows Terminal 1.15+ (reset via OSC 104 needs 1.22+).
+    If the profile has a "tabColor" key in settings.json, it overrides the
+    runtime sequence.
 
 .NOTES
     Author  : Ported to PowerShell/Windows by Claude
     License : MIT
-    Requires: Windows Terminal 1.18+, PowerShell 5.1+, Claude Code CLI
+    Requires: Windows Terminal 1.15+ (1.22+ for color reset), PowerShell 5.1+, Claude Code CLI
 #>
 
 Set-StrictMode -Version Latest
@@ -53,29 +54,183 @@ function Get-TerminalType {
 
 # ─── Tab Color / Title via OSC Escape Sequences ───────────────────────────────
 
+if (-not ('ClaudeTerm.Native' -as [type])) {
+    Add-Type -Namespace ClaudeTerm -Name Native -MemberDefinition @'
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool FreeConsole();
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool AttachConsole(uint dwProcessId);
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Auto)]
+        public static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFile(
+            string filename,
+            uint access,
+            uint share,
+            System.IntPtr securityAttributes,
+            uint creationDisposition,
+            uint flagsAndAttributes,
+            System.IntPtr templateFile);
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        public struct PROCESS_BASIC_INFORMATION {
+            public System.IntPtr ExitStatus;
+            public System.IntPtr PebBaseAddress;
+            public System.IntPtr AffinityMask;
+            public System.IntPtr BasePriority;
+            public System.IntPtr UniqueProcessId;
+            public System.IntPtr InheritedFromUniqueProcessId;
+        }
+
+        [System.Runtime.InteropServices.DllImport("ntdll.dll")]
+        public static extern int NtQueryInformationProcess(
+            System.IntPtr processHandle,
+            int processInformationClass,
+            ref PROCESS_BASIC_INFORMATION processInformation,
+            uint processInformationLength,
+            out uint returnLength);
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        public static extern System.IntPtr OpenProcess(uint desiredAccess, bool inheritHandle, uint processId);
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool CloseHandle(System.IntPtr handle);
+'@
+}
+
+function Get-ParentProcessId {
+    param([int]$ProcessId)
+    $PROCESS_QUERY_LIMITED_INFORMATION = [uint32]0x1000
+    $h = [ClaudeTerm.Native]::OpenProcess($PROCESS_QUERY_LIMITED_INFORMATION, $false, [uint32]$ProcessId)
+    if ($h -eq [System.IntPtr]::Zero) { return 0 }
+    try {
+        $info = New-Object ClaudeTerm.Native+PROCESS_BASIC_INFORMATION
+        $len  = [uint32]0
+        $size = [System.Runtime.InteropServices.Marshal]::SizeOf([type][ClaudeTerm.Native+PROCESS_BASIC_INFORMATION])
+        $status = [ClaudeTerm.Native]::NtQueryInformationProcess($h, 0, [ref]$info, [uint32]$size, [ref]$len)
+        if ($status -eq 0) {
+            return [int]$info.InheritedFromUniqueProcessId.ToInt64()
+        }
+        return 0
+    } finally {
+        [ClaudeTerm.Native]::CloseHandle($h) | Out-Null
+    }
+}
+
+function Get-ProcessNameFast {
+    param([int]$ProcessId)
+    try { return ([System.Diagnostics.Process]::GetProcessById($ProcessId)).ProcessName }
+    catch { return '' }
+}
+
+$script:TTY_CONSOLE_REATTACHED = $false
+
+function Write-Tty {
+    <#
+    .SYNOPSIS
+        Writes a raw string to the controlling terminal, bypassing stdout redirection.
+
+    .DESCRIPTION
+        When this process runs as a Claude Code hook, two layers isolate us
+        from Windows Terminal:
+
+        1. Redirected stdout: [Console]::Write goes to Claude's capture pipe,
+           not the terminal. Fix: write directly to the CONOUT$ device.
+
+        2. Isolated console: Claude spawns hooks with CREATE_NEW_CONSOLE (via
+           Node's spawn with windowsHide), so CONOUT$ opens *our own* hidden
+           console instead of WT's ConPTY. Fix: FreeConsole() then
+           AttachConsole(ATTACH_PARENT_PROCESS = -1) to inherit the parent's
+           console, which transitively shares WT's ConPTY.
+
+        We re-attach once per process and cache the result (hook.ps1 imports
+        the module fresh per subprocess, so "once per process" = once per
+        hook event).
+    #>
+    param([Parameter(Mandatory)][string]$Sequence)
+
+    if (-not $script:TTY_CONSOLE_REATTACHED) {
+        try {
+            # Find the ancestor whose parent is WindowsTerminal / OpenConsole —
+            # that process directly owns WT's ConPTY, so its console will
+            # forward OSC sequences through to Windows Terminal. Uses native
+            # NtQueryInformationProcess + .NET Process for fast walk (WMI was
+            # ~300ms/level, native is ~1ms/level).
+            $target = $null
+            $cur = $PID
+            for ($i = 0; $i -lt 10 -and $cur -gt 4; $i++) {
+                $parentPid = Get-ParentProcessId -ProcessId $cur
+                if (-not $parentPid -or $parentPid -le 4) { break }
+                $parentName = Get-ProcessNameFast -ProcessId $parentPid
+                if ($parentName -match '(?i)WindowsTerminal|OpenConsole') {
+                    $target = $cur
+                    break
+                }
+                $cur = $parentPid
+            }
+
+            [ClaudeTerm.Native]::FreeConsole() | Out-Null
+            if ($target) {
+                [ClaudeTerm.Native]::AttachConsole([uint32]$target) | Out-Null
+            } else {
+                [ClaudeTerm.Native]::AttachConsole([uint32]::MaxValue) | Out-Null
+            }
+        } catch {}
+        $script:TTY_CONSOLE_REATTACHED = $true
+    }
+
+    $GENERIC_WRITE = [uint32]0x40000000
+    $FILE_SHARE_RW = [uint32]3
+    $OPEN_EXISTING = [uint32]3
+
+    try {
+        $handle = [ClaudeTerm.Native]::CreateFile(
+            'CONOUT$',
+            $GENERIC_WRITE,
+            $FILE_SHARE_RW,
+            [System.IntPtr]::Zero,
+            $OPEN_EXISTING,
+            [uint32]0,
+            [System.IntPtr]::Zero
+        )
+        if ($handle.IsInvalid) { throw 'CreateFile(CONOUT$) failed' }
+        $stream = New-Object System.IO.FileStream($handle, [System.IO.FileAccess]::Write)
+        try {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($Sequence)
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Flush()
+        } finally {
+            $stream.Dispose()
+        }
+    } catch {
+        try { [Console]::Write($Sequence) } catch {}
+    }
+}
+
 function Set-WTTabColor {
     <#
     .SYNOPSIS
-        Sets the Windows Terminal tab color using OSC 9;16 escape sequence.
+        Sets the Windows Terminal tab-frame background color.
 
     .DESCRIPTION
-        Windows Terminal supports setting the tab background color from within
-        a running session using the private sequence:
-            ESC ] 9 ; 16 ; R ; G ; B ST
-        where R, G, B are integers 0-255.
+        Windows Terminal uses the xterm OSC 4 color-table sequence with the
+        reserved index 264 (FRAME_BACKGROUND):
+            ESC ] 4 ; 264 ; rgb:RR/GG/BB BEL
+        RR/GG/BB are two-digit hex (00-FF). Shipped in WT 1.15 (PR #13058).
 
-        Reference: https://github.com/microsoft/terminal/blob/main/doc/specs/%23654%20-%20Improved%20VT%20Tab%20and%20Window%20Title%20support.md
-        and Windows Terminal source: TerminalControl/TermControl.cpp
+        Note: OSC 9;16;R;G;B (iTerm2's proprietary sequence) is NOT supported
+        by Windows Terminal — the old code that tried it silently no-op'd.
+
+        If the profile has a "tabColor" key set in settings.json, it overrides
+        the runtime sequence and this call has no visible effect.
     #>
     param(
         [Parameter(Mandatory)][int]$R,
         [Parameter(Mandatory)][int]$G,
         [Parameter(Mandatory)][int]$B
     )
-    # ESC ] 9 ; 16 ; R ; G ; B BEL
     $esc = [char]27
     $bel = [char]7
-    [Console]::Write("${esc}]9;16;${R};${G};${B}${bel}")
+    $hex = '{0:x2}/{1:x2}/{2:x2}' -f $R, $G, $B
+    Write-Tty "${esc}]4;264;rgb:${hex}${bel}"
 }
 
 function Reset-WTTabColor {
@@ -84,13 +239,43 @@ function Reset-WTTabColor {
         Resets the Windows Terminal tab color to the profile default.
 
     .DESCRIPTION
-        Sends OSC 9;16 with value -1 to signal a reset, which Windows Terminal
-        interprets as "use the profile-default tabColor".
+        OSC 104 with index 264 resets the frame background to the profile
+        default. Landed in WT 1.22 (PR #18767, April 2025). On older WT
+        versions this silently no-ops; there is no true reset on <1.22.
+    #>
+    $esc = [char]27
+    Write-Tty "${esc}]104;264${esc}\"
+}
+
+function Set-WTBackgroundColor {
+    <#
+    .SYNOPSIS
+        Sets the terminal content background color via xterm OSC 11.
+
+    .DESCRIPTION
+        Emits: ESC ] 11 ; rgb:RR/GG/BB BEL
+        Tints the terminal's content area (the rendered text background).
+        Standard xterm sequence supported by Windows Terminal.
+    #>
+    param(
+        [Parameter(Mandatory)][int]$R,
+        [Parameter(Mandatory)][int]$G,
+        [Parameter(Mandatory)][int]$B
+    )
+    $esc = [char]27
+    $bel = [char]7
+    $hex = '{0:x2}/{1:x2}/{2:x2}' -f $R, $G, $B
+    Write-Tty "${esc}]11;rgb:${hex}${bel}"
+}
+
+function Reset-WTBackgroundColor {
+    <#
+    .SYNOPSIS
+        Resets the terminal content background to the profile default (OSC 111).
     #>
     $esc = [char]27
     $bel = [char]7
-    # Reset: send empty/reset sequence. WT interprets ESC]9;16;-1;-1;-1 as reset.
-    [Console]::Write("${esc}]9;16;-1;-1;-1${bel}")
+    Write-Tty "${esc}]111${bel}"
 }
 
 function Set-WTTabTitle {
@@ -101,7 +286,7 @@ function Set-WTTabTitle {
     param([string]$Title)
     $esc = [char]27
     $bel = [char]7
-    [Console]::Write("${esc}]0;${Title}${bel}")
+    Write-Tty "${esc}]0;${Title}${bel}"
 }
 
 # ─── Config Helpers ───────────────────────────────────────────────────────────
@@ -213,8 +398,15 @@ function Invoke-ThemeState {
 
     if ($action -eq 'reset') {
         Reset-WTTabColor
+        if ($DoColor) { Reset-WTBackgroundColor }
     } elseif ($DoColor -and $action -eq 'color') {
         Set-WTTabColor -R $stateConfig.r -G $stateConfig.g -B $stateConfig.b
+        if ($stateConfig.PSObject.Properties['bg']) {
+            $bg = $stateConfig.bg
+            Set-WTBackgroundColor -R $bg.r -G $bg.g -B $bg.b
+        } else {
+            Reset-WTBackgroundColor
+        }
     }
 
     if ($DoTitle -and $ProjectName) {
@@ -230,7 +422,7 @@ function Show-Help {
     Write-Host "(Ported from TabChroma by JCPetrelli)"
     Write-Host ""
     Write-Host "USAGE:"
-    Write-Host "  claude-term <command> [args]"
+    Write-Host '  claude-term <command> [args]'
     Write-Host ""
     Write-Host "CONTROLS:"
     Write-Host "  pause                 Disable color changes"
@@ -240,7 +432,7 @@ function Show-Help {
     Write-Host ""
     Write-Host "THEMES:"
     Write-Host "  theme list            List installed themes"
-    Write-Host "  theme use <name>      Switch active theme"
+    Write-Host '  theme use <name>      Switch active theme'
     Write-Host "  theme next            Cycle to next theme"
     Write-Host "  theme preview [name]  Preview all states (2s each)"
     Write-Host ""
@@ -249,7 +441,7 @@ function Show-Help {
     Write-Host "  color on|off          Toggle tab color changes"
     Write-Host ""
     Write-Host "TESTING:"
-    Write-Host "  test <state>          Manually trigger a state"
+    Write-Host '  test <state>          Manually trigger a state'
     Write-Host "    States: working  done  attention  permission  session.start"
     Write-Host "  reset                 Reset tab to default color"
     Write-Host ""
@@ -328,7 +520,7 @@ function Get-ThemeList {
 
 function Set-ActiveTheme([string]$Name) {
     if (-not $Name) {
-        Write-Error "Usage: claude-term theme use <name>"
+        Write-Error 'Usage: claude-term theme use <name>'
         return
     }
     $themeDir = Join-Path $script:THEMES_DIR $Name
@@ -385,7 +577,7 @@ function Invoke-ThemePreview([string]$Name = '') {
 function Invoke-Test([string]$StateName) {
     $valid = @('working','done','attention','permission','session.start')
     if (-not $StateName -or $StateName -notin $valid) {
-        Write-Error "Usage: claude-term test <state>"
+        Write-Error 'Usage: claude-term test <state>'
         Write-Host "States: $($valid -join '  ')"
         return
     }
@@ -772,6 +964,8 @@ Export-ModuleMember -Function @(
     'Get-TerminalType',
     'Set-WTTabColor',
     'Reset-WTTabColor',
+    'Set-WTBackgroundColor',
+    'Reset-WTBackgroundColor',
     'Set-WTTabTitle',
 
     # ── CLI commands (each reachable via Invoke-ClaudeTerm, but also

@@ -3,27 +3,29 @@
 Windows Terminal visual feedback plugin for [Claude Code](https://claude.ai/code).  
 Ported from [TabChroma](https://github.com/JCPetrelli/TabChroma) by JCPetrelli.
 
-Changes your Windows Terminal **tab color** and **title** based on what Claude is doing — so you can glance at any tab and know its state at a moment's notice.
+Changes your Windows Terminal **tab color**, **content background tint**, and **title** based on what Claude is doing — so you can glance at any tab and know its state at a moment's notice.
 
-| State | Default Color | Meaning |
-|---|---|---|
-| `working` | 🔵 Blue | Claude is processing |
-| `done` | 🟢 Green | Ready for your input |
-| `attention` | 🟠 Orange | Needs your attention |
-| `permission` | 🔴 Red | Awaiting tool approval |
-| `session.start` | *(reset)* | New session began |
+| State | Tab frame | Content bg | Meaning |
+|---|---|---|---|
+| `working` | 🔵 Blue | Dark blue tint | Claude is processing |
+| `done` | 🟢 Green | *(reset)* | Ready for your input |
+| `permission` | 🔴 Red | *(reset)* | Awaiting tool approval |
+| `session.start` | *(reset)* | *(reset)* | New session began |
+
+`attention` (orange) is also defined in themes but is not currently wired to any Claude hook event — available for custom use.
 
 ---
 
 ## Requirements
 
-- **Windows 10/11** with [Windows Terminal](https://aka.ms/terminal) **1.18+**
+- **Windows 10/11** with [Windows Terminal](https://aka.ms/terminal) **1.15+** (1.22+ required for clean color reset)
 - **PowerShell 5.1+** (built into Windows) or PowerShell 7+
 - **[Claude Code](https://claude.ai/code)** CLI installed
 
 > **Note:** Tab color changes require Windows Terminal — they will not work in
 > the legacy Windows Console Host (`conhost.exe`) or VS Code's integrated
-> terminal.
+> terminal. If a profile has `tabColor` set in `settings.json`, it overrides
+> runtime color changes.
 
 ---
 
@@ -109,19 +111,39 @@ ClaudeTerm registers itself as a Claude Code hook for these events:
 | `Notification` | `attention` or `permission` (based on message content) |
 | `PermissionRequest` | `permission` |
 
-### Tab Color Mechanism
+### Escape Sequences
 
-Windows Terminal supports changing the tab color of a running session via
-the OSC 9;16 escape sequence:
+ClaudeTerm emits three xterm/Windows-Terminal OSC sequences:
 
-```
-ESC ] 9 ; 16 ; <R> ; <G> ; <B> BEL
-```
+| Purpose | Sequence | WT support |
+|---|---|---|
+| Tab frame color | `ESC ] 4 ; 264 ; rgb:RR/GG/BB BEL` | 1.15+ (PR #13058) |
+| Tab frame reset | `ESC ] 104 ; 264 ESC \` | 1.22+ (PR #18767) |
+| Content background | `ESC ] 11 ; rgb:RR/GG/BB BEL` | xterm standard |
+| Background reset | `ESC ] 111 BEL` | xterm standard |
+| Tab title | `ESC ] 0 ; <title> BEL` | xterm standard |
 
-ClaudeTerm writes this sequence to `[Console]::Out` on every hook event.
-This is distinct from the `--tabColor` command-line flag (which only works
-at launch time) and from `settings.json` `tabColor` (which affects all tabs
-of a profile).
+Note: `OSC 9;16;R;G;B` is iTerm2's proprietary sequence and is **not**
+supported by Windows Terminal (even though it's widely quoted). Use OSC 4
+with color-table index 264 (FRAME_BACKGROUND).
+
+### Delivering Sequences Through Claude Code's Subprocess
+
+Claude Code spawns hooks as `powershell.exe -NonInteractive -File hook.ps1`
+with stdout/stderr redirected for capture. Two consequences:
+
+1. Writing to `[Console]::Out` lands in Claude's capture buffer, never the
+   terminal. Fix: `CreateFile("CONOUT$")` via kernel32 P/Invoke to write
+   directly to the console device.
+2. The subprocess is spawned with a new console (isolated from WT's
+   ConPTY), so `CONOUT$` opens a hidden buffer by default. Fix:
+   `FreeConsole()` then `AttachConsole()` walking up the parent process
+   tree until we hit an ancestor whose parent is `WindowsTerminal.exe` or
+   `OpenConsole.exe` — that's the process directly owning the ConPTY
+   that forwards to WT.
+
+Parent-process lookup uses native `NtQueryInformationProcess`
+(~1ms/level) rather than WMI (~300ms/level) to keep hooks responsive.
 
 ### Debouncing
 
@@ -185,13 +207,19 @@ Create `%USERPROFILE%\.claude\hooks\claude-term\themes\<n>\theme.json`:
   "description": "Custom color scheme",
   "states": {
     "session.start": { "action": "reset", "label": "Session started" },
-    "working":    { "r": 0,   "g": 100, "b": 200, "label": "Working"    },
+    "working":    { "r": 0,   "g": 100, "b": 200, "bg": { "r": 10, "g": 30, "b": 80 }, "label": "Working"    },
     "done":       { "r": 34,  "g": 180, "b": 80,  "label": "Done"       },
     "attention":  { "r": 255, "g": 160, "b": 40,  "label": "Attention"  },
     "permission": { "r": 220, "g": 60,  "b": 40,  "label": "Permission" }
   }
 }
 ```
+
+**Fields per state:**
+- `r`, `g`, `b` — tab frame color (0–255 each)
+- `bg` — optional object `{ r, g, b }` to tint the terminal content background while the state is active. States without `bg` reset the background to the profile default.
+- `action: "reset"` — use instead of RGB for `session.start` to reset both tab and background.
+- `label` — displayed in status/preview output.
 
 ---
 
@@ -229,9 +257,10 @@ Or run `.\uninstall.ps1` from the repo directory.
 
 | Feature | TabChroma (macOS) | ClaudeTerm (Windows) |
 |---|---|---|
-| Terminal | iTerm2 | Windows Terminal 1.18+ |
+| Terminal | iTerm2 | Windows Terminal 1.15+ |
 | Shell | bash / zsh | PowerShell 5.1+ |
-| Tab color | iTerm2 OSC `6;1;bg` | WT OSC `9;16;R;G;B` |
+| Tab color | iTerm2 OSC `6;1;bg` | WT OSC `4;264;rgb:RR/GG/BB` |
+| Content bg tint | N/A | OSC `11;rgb:RR/GG/BB` |
 | Badge | ✅ (iTerm2 proprietary) | ❌ Not supported by WT |
 | Tab title | ✅ | ✅ |
 | Install | `bash install.sh` | `.\install.ps1` |

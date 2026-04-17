@@ -21,9 +21,23 @@ VERSION              Plain-text version number
 ## Key Design Decisions
 
 ### Tab color mechanism
-Windows Terminal supports OSC 9;16;R;G;B to set tab color from inside a
-running session. This is written to [Console]::Out (not stderr). The reset
-sequence uses R=G=B=-1.
+Windows Terminal sets the tab frame background via the xterm OSC 4 sequence
+targeting the reserved color-table index 264 (FRAME_BACKGROUND):
+    ESC ] 4 ; 264 ; rgb:RR/GG/BB BEL
+Reset uses OSC 104;264 (WT 1.22+ only).
+
+OSC 9;16;R;G;B is iTerm2-proprietary and **not** implemented by WT — the
+initial version of this module used it and silently no-op'd. Shipped in
+WT 1.15 via PR #13058.
+
+Sequences are written directly to the CONOUT$ console device via
+CreateFile (kernel32 P/Invoke), not to stdout. This is necessary because
+Claude Code spawns hook subprocesses with redirected stdout/stderr; writes
+to [Console]::Out land in Claude's capture buffer, never the terminal.
+The P/Invoke is needed because [System.IO.File]::Open refuses device paths.
+
+If a profile has `"tabColor"` set in settings.json, it overrides runtime
+OSC and the color will not change.
 
 ### No badge support
 Windows Terminal has no badge equivalent. The badge feature from TabChroma
