@@ -1,16 +1,27 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    ClaudeTerm uninstaller.
+    claude-term uninstaller: removes the hooks from settings.json files, the
+    shims, and the installed directory. Pass -Settings for extra profiles.
 #>
 
-$ErrorActionPreference = 'Continue'
+param(
+    [string]$InstallDir = (Join-Path $env:USERPROFILE '.claude\hooks\claude-term'),
+    [string[]]$Settings = @((Join-Path $env:USERPROFILE '.claude\settings.json'))
+)
 
-$moduleFile = Join-Path $PSScriptRoot 'ClaudeTerm.psm1'
-if (-not (Test-Path $moduleFile)) {
-    Write-Error "ClaudeTerm module not found at: $moduleFile"
-    exit 1
+$ErrorActionPreference = 'Continue'
+$script = Join-Path $InstallDir 'claude_term.py'
+
+if (Test-Path $script) {
+    foreach ($settingsFile in $Settings) {
+        if (Test-Path $settingsFile) { & python -S -E $script uninstall $settingsFile }
+    }
 }
 
-Import-Module $moduleFile -Force -DisableNameChecking
-Invoke-ClaudeTerm -Args @('uninstall')
+$binDir = Join-Path $env:USERPROFILE '.local\bin'
+Remove-Item (Join-Path $binDir 'claude-term.cmd'), (Join-Path $binDir 'claude-term') -Force -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $env:USERPROFILE '.claude\commands\tab-status.md'), (Join-Path $env:USERPROFILE '.claude\commands\theme.md') -Force -ErrorAction SilentlyContinue
+Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
+
+Write-Host "claude-term removed. Open sessions keep their current tab color until they end."

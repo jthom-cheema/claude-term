@@ -1,101 +1,62 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    ClaudeTerm installer - registers hooks and sets up the shell wrapper.
+    claude-term installer: copies the tool into ~/.claude/hooks/claude-term,
+    registers the Claude Code hooks, and adds a `claude-term` command.
 
 .DESCRIPTION
-    Works both as a local install (from cloned repo) and as a remote install:
+    Requires Python 3.8+ on PATH (the hook runs `python -S -E claude_term.py hook`).
 
-        irm https://raw.githubusercontent.com/YOUR_ORG/ClaudeTerm/main/install.ps1 | iex
-
-    What this script does:
-      1. Copies ClaudeTerm files to $env:USERPROFILE\.claude\hooks\claude-term\
-      2. Registers Claude Code hook events in settings.json
-      3. Adds a 'claude' function wrapper to your PowerShell profile so the
-         tab color resets when you exit Claude Code (Claude Code has no
-         SessionEnd hook, so a shell wrapper is the only way to do this).
-      4. Adds claude-term as a function alias in your profile.
+    Run from a clone of the repo:
+        .\install.ps1
+    Register for an extra Claude Code profile too (for example a stock
+    profile started with CLAUDE_CONFIG_DIR):
+        .\install.ps1 -Settings "$env:USERPROFILE\.claude-direct\settings.json"
 #>
 
 param(
-    [string]$InstallDir = (Join-Path $env:USERPROFILE '.claude\hooks\claude-term')
+    [string]$InstallDir = (Join-Path $env:USERPROFILE '.claude\hooks\claude-term'),
+    [string[]]$Settings = @((Join-Path $env:USERPROFILE '.claude\settings.json'))
 )
 
 $ErrorActionPreference = 'Stop'
+$source = $PSScriptRoot
 
-# ─── Detect local vs remote install ──────────────────────────────────────────
-
-$scriptDir = $PSScriptRoot
-
-# When piped via iex, $PSScriptRoot is empty
-$isLocal = $scriptDir -and (Test-Path (Join-Path $scriptDir 'ClaudeTerm.psm1'))
-
-if ($isLocal) {
-    Write-Host "ClaudeTerm installer (local)"
-    $sourceDir = $scriptDir
-} else {
-    Write-Host "ClaudeTerm installer (remote)"
-    Write-Host ""
-
-    $repo    = 'YOUR_ORG/ClaudeTerm'   # Update this when you publish the repo
-    $tarball = "https://github.com/$repo/archive/refs/heads/main.zip"
-
-    $tmpDir = Join-Path $env:TEMP "claude-term-install-$(Get-Random)"
-    New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
-
-    Write-Host "Downloading from GitHub..."
-    $zipPath = Join-Path $tmpDir 'claudeterm.zip'
-    Invoke-WebRequest -Uri $tarball -OutFile $zipPath -UseBasicParsing
-    Expand-Archive -Path $zipPath -DestinationPath $tmpDir -Force
-
-    # Find extracted subfolder (e.g. ClaudeTerm-main)
-    $sourceDir = Get-ChildItem $tmpDir -Directory | Select-Object -First 1 -ExpandProperty FullName
+$python = Get-Command python -ErrorAction SilentlyContinue
+if (-not $python) {
+    Write-Error "python was not found on PATH. Install Python 3 and re-run."
 }
 
-$version = if (Test-Path (Join-Path $sourceDir 'VERSION')) {
-    (Get-Content (Join-Path $sourceDir 'VERSION') -Raw).Trim()
-} else { 'unknown' }
-
-Write-Host ""
-Write-Host "Installing ClaudeTerm v$version to: $InstallDir"
-Write-Host ""
-
-# ─── Copy files to install dir ───────────────────────────────────────────────
-
-if (-not (Test-Path $InstallDir)) {
-    New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+foreach ($item in @('claude_term.py', 'themes', 'VERSION', 'README.md')) {
+    Copy-Item (Join-Path $source $item) (Join-Path $InstallDir $item) -Recurse -Force
 }
 
-foreach ($item in @('ClaudeTerm.psm1', 'hook.ps1', 'claude-term.ps1', 'themes', 'VERSION')) {
-    $src = Join-Path $sourceDir $item
-    if (Test-Path $src) {
-        Copy-Item $src (Join-Path $InstallDir $item) -Recurse -Force
-    }
+# Optional slash commands (/tab-status, /theme)
+$commandsDst = Join-Path $env:USERPROFILE '.claude\commands'
+New-Item -ItemType Directory -Path $commandsDst -Force | Out-Null
+Copy-Item (Join-Path $source 'commands\*') $commandsDst -Force
+
+# Register hooks in every requested settings file
+$script = Join-Path $InstallDir 'claude_term.py'
+foreach ($settingsFile in $Settings) {
+    & python -S -E $script install $settingsFile
 }
 
-# Copy slash commands if present
-$commandsSrc = Join-Path $sourceDir 'commands'
-if (Test-Path $commandsSrc) {
-    $commandsDst = Join-Path $env:USERPROFILE '.claude\commands'
-    if (-not (Test-Path $commandsDst)) {
-        New-Item -ItemType Directory -Path $commandsDst -Force | Out-Null
-    }
-    Copy-Item (Join-Path $commandsSrc '*') $commandsDst -Force
-    Write-Host "Installed Claude slash commands to: $commandsDst"
+# `claude-term` command: a .cmd shim on PATH via ~/.local/bin, plus a bash shim for Git Bash
+$binDir = Join-Path $env:USERPROFILE '.local\bin'
+New-Item -ItemType Directory -Path $binDir -Force | Out-Null
+$cmdShim = "@echo off`r`npython -S -E `"%USERPROFILE%\.claude\hooks\claude-term\claude_term.py`" %*`r`n"
+[IO.File]::WriteAllText((Join-Path $binDir 'claude-term.cmd'), $cmdShim)
+$bashShim = "#!/usr/bin/env bash`nexec python -S -E `"`$HOME/.claude/hooks/claude-term/claude_term.py`" `"`$@`"`n"
+[IO.File]::WriteAllText((Join-Path $binDir 'claude-term'), $bashShim)
+
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if (($userPath -split ';') -notcontains $binDir) {
+    [Environment]::SetEnvironmentVariable('Path', "$userPath;$binDir", 'User')
+    Write-Host "Added $binDir to your user PATH (open a new terminal to pick it up)."
 }
 
-# ─── Delegate to the module's Install-ClaudeTerm ─────────────────────────────
-
-$moduleFile = Join-Path $InstallDir 'ClaudeTerm.psm1'
-Import-Module $moduleFile -Force -DisableNameChecking
-
-# Override SCRIPT_DIR so Install-ClaudeTerm writes the correct hook path
-# (The module sets $script:SCRIPT_DIR at import time from $PSScriptRoot,
-#  which will be the install dir since we imported from there.)
-Install-ClaudeTerm
-
 Write-Host ""
-Write-Host "Done! Reload your shell, then test with:"
-Write-Host ""
-Write-Host "    claude-term test working"
-Write-Host ""
+Write-Host "Installed claude-term $((Get-Content (Join-Path $InstallDir 'VERSION')).Trim()) to $InstallDir"
+Write-Host "Hooks apply to new Claude Code sessions. Try:  claude-term test working"
